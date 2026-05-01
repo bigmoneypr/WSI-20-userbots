@@ -1,13 +1,17 @@
 """
 Run this script ONCE on your local computer to generate session strings
-for all your Telegram accounts in one go.
+for all 20 Telegram accounts in one go.
+
+You only need ONE API_ID and ONE API_HASH (from my.telegram.org — login once).
+The same credentials work for all 20 accounts.
 
 Usage:
   pip install telethon
   python generate_all_sessions.py
 
-At the end it prints the complete BOTS_CONFIG JSON value ready to paste
-directly into Render as a single environment variable.
+At the end it prints:
+  - BOTS_SESSIONS  (just the session strings — paste on Render)
+  - API_ID and API_HASH to also add on Render
 """
 
 import asyncio
@@ -16,28 +20,14 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 
-async def generate_session(bot_number: int) -> dict | None:
+async def generate_session(api_id: int, api_hash: str, bot_number: int, total: int) -> str | None:
     print(f"\n{'='*55}")
-    print(f"  BOT {bot_number} of 20")
+    print(f"  BOT {bot_number} of {total}")
     print(f"{'='*55}")
 
-    skip = input("Press ENTER to continue, or type 'skip' to skip this bot: ").strip().lower()
-    if skip == "skip":
-        print(f"Bot {bot_number} skipped.")
-        return None
-
-    api_id_str = input("  API_ID   (from my.telegram.org): ").strip()
-    api_hash   = input("  API_HASH (from my.telegram.org): ").strip()
-    phone      = input("  Phone number (e.g. +2348012345678): ").strip()
-
-    if not api_id_str or not api_hash or not phone:
-        print("  Missing input — skipping this bot.")
-        return None
-
-    try:
-        api_id = int(api_id_str)
-    except ValueError:
-        print("  API_ID must be a number — skipping this bot.")
+    phone = input("  Phone number (e.g. +2348012345678) or 'skip': ").strip()
+    if phone.lower() == "skip":
+        print(f"  Bot {bot_number} skipped.")
         return None
 
     client = TelegramClient(StringSession(), api_id, api_hash)
@@ -46,7 +36,7 @@ async def generate_session(bot_number: int) -> dict | None:
         await client.connect()
         if not await client.is_user_authorized():
             await client.send_code_request(phone)
-            code = input("  Enter the OTP code sent to your Telegram: ").strip()
+            code = input("  OTP code sent to Telegram: ").strip()
             try:
                 await client.sign_in(phone, code)
             except Exception:
@@ -54,12 +44,9 @@ async def generate_session(bot_number: int) -> dict | None:
                 await client.sign_in(password=password)
 
         session_string = client.session.save()
-        print(f"\n  Bot {bot_number} session generated successfully!")
-        return {
-            "api_id": api_id,
-            "api_hash": api_hash,
-            "session": session_string,
-        }
+        print(f"  Bot {bot_number}: session generated!")
+        return session_string
+
     except Exception as e:
         print(f"  Error: {e}")
         return None
@@ -69,49 +56,76 @@ async def generate_session(bot_number: int) -> dict | None:
 
 async def main():
     print("\n" + "="*55)
-    print("  WSI 20 Userbots — Session Generator")
-    print("  Generates all session strings in one run.")
-    print("  You will need: API_ID, API_HASH (from my.telegram.org)")
-    print("  and the phone number for each of the 20 accounts.")
+    print("  WSI 20 Userbots — Bulk Session Generator")
     print("="*55)
+    print()
+    print("You need ONE API_ID and ONE API_HASH for all bots.")
+    print("Get them from: https://my.telegram.org")
+    print("  1. Log in with any one phone number")
+    print("  2. Click 'API development tools'")
+    print("  3. Create an app (any name, any platform)")
+    print("  4. Copy the App api_id and App api_hash below")
+    print()
 
-    num_bots_str = input("\nHow many bots do you want to set up? (1-20, default 20): ").strip()
-    num_bots = 20
-    if num_bots_str.isdigit():
-        num_bots = max(1, min(20, int(num_bots_str)))
+    api_id_str = input("Enter API_ID: ").strip()
+    api_hash   = input("Enter API_HASH: ").strip()
 
-    results = []
-
-    for i in range(1, num_bots + 1):
-        creds = await generate_session(i)
-        if creds:
-            results.append(creds)
-
-    print("\n\n" + "="*55)
-    print("  ALL DONE!")
-    print(f"  {len(results)} bot(s) configured successfully.")
-    print("="*55)
-
-    if not results:
-        print("\nNo sessions were generated. Exiting.")
+    try:
+        api_id = int(api_id_str)
+    except ValueError:
+        print("API_ID must be a number. Exiting.")
         return
 
-    bots_config_json = json.dumps(results, indent=2)
+    num_str = input("\nHow many bots? (1-20, default 20): ").strip()
+    num_bots = 20
+    if num_str.isdigit():
+        num_bots = max(1, min(20, int(num_str)))
 
-    print("\n")
-    print("COPY EVERYTHING BETWEEN THE LINES BELOW:")
-    print("-"*55)
-    print(bots_config_json)
-    print("-"*55)
-    print("\nPaste this as the value of BOTS_CONFIG on Render.")
-    print("That's all — just ONE environment variable needed!\n")
+    print(f"\nNow enter the phone number for each of the {num_bots} accounts.")
+    print("You will receive an OTP on Telegram for each one.\n")
 
-    # Also save to a local file for convenience
-    output_file = "bots_config.json"
-    with open(output_file, "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"Also saved to: {output_file}")
-    print("WARNING: Delete this file after use — it contains sensitive session strings!\n")
+    sessions = []
+
+    for i in range(1, num_bots + 1):
+        session = await generate_session(api_id, api_hash, i, num_bots)
+        if session:
+            sessions.append(session)
+
+    print("\n\n" + "="*55)
+    print(f"  DONE! {len(sessions)} session(s) generated.")
+    print("="*55)
+
+    if not sessions:
+        print("No sessions generated. Exiting.")
+        return
+
+    bots_sessions_json = json.dumps(sessions, indent=2)
+
+    print("\n\n--- STEP 1: Add this to Render as API_ID ---")
+    print(api_id)
+
+    print("\n--- STEP 2: Add this to Render as API_HASH ---")
+    print(api_hash)
+
+    print("\n--- STEP 3: Add this to Render as BOTS_SESSIONS ---")
+    print(bots_sessions_json)
+
+    print("\n" + "="*55)
+    print("Only 3 environment variables needed on Render:")
+    print("  API_ID, API_HASH, BOTS_SESSIONS")
+    print("="*55 + "\n")
+
+    # Save to file for convenience
+    output = {
+        "API_ID": api_id,
+        "API_HASH": api_hash,
+        "BOTS_SESSIONS": sessions,
+    }
+    with open("sessions_output.json", "w") as f:
+        json.dump(output, f, indent=2)
+
+    print("Also saved to: sessions_output.json")
+    print("!! DELETE this file after copying to Render — it contains sensitive data !!\n")
 
 
 if __name__ == "__main__":
