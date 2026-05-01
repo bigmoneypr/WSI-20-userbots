@@ -1,10 +1,8 @@
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
-
-# Telegram API credentials - each bot needs its own API_ID and API_HASH
-# Set these as environment variables: BOT1_API_ID, BOT1_API_HASH, BOT1_SESSION, etc.
 
 CHAT_IDS = [
     -5183093777,
@@ -13,12 +11,8 @@ CHAT_IDS = [
     -5119430444,
 ]
 
-# Nigeria time zone
 TIMEZONE = "Africa/Lagos"
 
-# Schedule definition
-# Each entry: (start_hour, start_minute, end_hour, end_minute, message)
-# Bots will send within the start-end window, staggered across the 20 bots
 SCHEDULE = [
     (5,  0,  5, 20, "Ready"),
     (6, 10,  6, 30, "Done"),
@@ -30,23 +24,30 @@ SCHEDULE = [
     (13, 45, 14,  5, "Done"),
 ]
 
-NUM_BOTS = 20
 
+def get_all_bot_credentials() -> list[dict]:
+    """
+    Reads a single environment variable BOTS_CONFIG containing a JSON array.
 
-def get_bot_credentials(bot_index: int) -> dict:
+    Format (paste this as the value of BOTS_CONFIG on Render):
+    [
+      {"api_id": 12345, "api_hash": "abc123", "session": "..."},
+      {"api_id": 67890, "api_hash": "def456", "session": "..."},
+      ...
+    ]
     """
-    Returns credentials for a given bot (1-indexed in env vars).
-    Environment variables expected:
-      BOT{n}_API_ID
-      BOT{n}_API_HASH
-      BOT{n}_SESSION
-    """
-    n = bot_index + 1
-    api_id = os.environ.get(f"BOT{n}_API_ID")
-    api_hash = os.environ.get(f"BOT{n}_API_HASH")
-    session = os.environ.get(f"BOT{n}_SESSION")
-    return {
-        "api_id": int(api_id) if api_id else None,
-        "api_hash": api_hash,
-        "session": session,
-    }
+    raw = os.environ.get("BOTS_CONFIG")
+    if not raw:
+        raise RuntimeError(
+            "BOTS_CONFIG environment variable is not set. "
+            "Set it to a JSON array of bot credentials."
+        )
+    try:
+        bots = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"BOTS_CONFIG is not valid JSON: {e}")
+
+    if not isinstance(bots, list) or len(bots) == 0:
+        raise RuntimeError("BOTS_CONFIG must be a non-empty JSON array.")
+
+    return bots
