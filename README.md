@@ -15,7 +15,7 @@ Automated Telegram userbot system — 20 accounts sending scheduled messages to 
 | 12:10 PM – 12:30 PM | Ready |
 | 1:45 PM – 2:05 PM | Done |
 
-Each bot sends staggered within each window so all 20 don't message at the exact same time.
+Each bot sends staggered within the window so all 20 don't message at exactly the same time.
 
 ## Target Chats
 
@@ -25,34 +25,58 @@ All 20 bots send to:
 - `-5127067052`
 - `-5119430444`
 
-## Setup
+---
 
-### 1. Get API credentials
-Go to [my.telegram.org](https://my.telegram.org), log in, and create an app. You'll get an `API_ID` and `API_HASH` for each account.
+## Setup Guide
 
-### 2. Generate session strings
-Run locally (do NOT run on server):
+### Step 1 — Get Telegram API credentials
+
+1. Go to [my.telegram.org](https://my.telegram.org) and log in with each phone number
+2. Click **API development tools**
+3. Create an app — you'll get an `api_id` (number) and `api_hash` (string)
+4. Do this for each of the 20 accounts
+
+### Step 2 — Generate session strings (run locally once per account)
+
 ```bash
 pip install telethon
 python generate_session.py
 ```
-Do this once per account. Copy the printed session string.
 
-### 3. Deploy to Render
+Enter the phone number and OTP when prompted. Copy the printed session string for each account.
 
-1. Connect this GitHub repo on [render.com](https://render.com)
-2. Create a **Background Worker** service
-3. Set environment variables for each bot:
-   - `BOT1_API_ID`, `BOT1_API_HASH`, `BOT1_SESSION`
-   - `BOT2_API_ID`, `BOT2_API_HASH`, `BOT2_SESSION`
-   - ... up to `BOT20_*`
+### Step 3 — Build your BOTS_CONFIG value
 
-### 4. Start the service
-Render will run `python bot.py` which starts all 20 bots concurrently.
+Create a JSON array like this (one object per bot):
 
-## Environment Variables
+```json
+[
+  {"api_id": 12345678, "api_hash": "abc123def456", "session": "1BVtsOK8..."},
+  {"api_id": 12345678, "api_hash": "abc123def456", "session": "1BVtsOK8..."},
+  ...
+]
+```
 
-Each bot `n` (1–20) needs three variables:
-- `BOTn_API_ID` — integer API ID from my.telegram.org
-- `BOTn_API_HASH` — string API hash from my.telegram.org
-- `BOTn_SESSION` — session string from `generate_session.py`
+You will paste this entire JSON block as the value of **one single environment variable** called `BOTS_CONFIG` on Render.
+
+### Step 4 — Deploy to Render
+
+1. Go to [render.com](https://render.com) → **New** → **Background Worker**
+2. Connect your GitHub account → select `WSI-20-userbots` repo
+3. Settings:
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `python bot.py`
+4. Under **Environment Variables**, add just **ONE variable**:
+   - **Key:** `BOTS_CONFIG`
+   - **Value:** your full JSON array from Step 3
+5. Click **Create Worker** — done!
+
+---
+
+## Environment Variable Format
+
+Only **one** environment variable is needed:
+
+| Key | Value |
+|-----|-------|
+| `BOTS_CONFIG` | JSON array of all 20 bot credentials |
