@@ -24,30 +24,54 @@ SCHEDULE = [
     (13, 45, 14,  5, "Done"),
 ]
 
+# One shared API_ID and API_HASH for all bots (from my.telegram.org — login once)
+SHARED_API_ID = int(os.environ.get("API_ID", "0"))
+SHARED_API_HASH = os.environ.get("API_HASH", "")
+
 
 def get_all_bot_credentials() -> list[dict]:
     """
-    Reads a single environment variable BOTS_CONFIG containing a JSON array.
+    Reads BOTS_SESSIONS — a JSON array of session strings only.
+    The shared API_ID and API_HASH are set separately as API_ID and API_HASH.
 
-    Format (paste this as the value of BOTS_CONFIG on Render):
+    BOTS_SESSIONS format (just the session strings):
     [
-      {"api_id": 12345, "api_hash": "abc123", "session": "..."},
-      {"api_id": 67890, "api_hash": "def456", "session": "..."},
+      "1BVtsOK8...",
+      "1BVtsOK8...",
+      ...
+    ]
+
+    Or alternatively, BOTS_CONFIG with full per-bot credentials (legacy):
+    [
+      {"api_id": 123, "api_hash": "abc", "session": "..."},
       ...
     ]
     """
-    raw = os.environ.get("BOTS_CONFIG")
-    if not raw:
-        raise RuntimeError(
-            "BOTS_CONFIG environment variable is not set. "
-            "Set it to a JSON array of bot credentials."
-        )
-    try:
+    if not SHARED_API_ID or not SHARED_API_HASH:
+        # Fall back to per-bot credentials if shared not set
+        raw = os.environ.get("BOTS_CONFIG")
+        if not raw:
+            raise RuntimeError(
+                "Set API_ID and API_HASH (shared), plus BOTS_SESSIONS (list of session strings). "
+                "Or set BOTS_CONFIG with full per-bot credentials."
+            )
         bots = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"BOTS_CONFIG is not valid JSON: {e}")
+        return bots
 
-    if not isinstance(bots, list) or len(bots) == 0:
-        raise RuntimeError("BOTS_CONFIG must be a non-empty JSON array.")
+    # Preferred: shared API creds + just session strings
+    raw = os.environ.get("BOTS_SESSIONS")
+    if raw:
+        sessions = json.loads(raw)
+        return [
+            {"api_id": SHARED_API_ID, "api_hash": SHARED_API_HASH, "session": s}
+            for s in sessions
+        ]
 
-    return bots
+    # Also support BOTS_CONFIG with full objects
+    raw = os.environ.get("BOTS_CONFIG")
+    if raw:
+        return json.loads(raw)
+
+    raise RuntimeError(
+        "No bot credentials found. Set API_ID, API_HASH, and BOTS_SESSIONS environment variables."
+    )
