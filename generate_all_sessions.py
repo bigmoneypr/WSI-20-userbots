@@ -16,8 +16,23 @@ At the end it prints:
 
 import asyncio
 import json
+import random
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+
+# Realistic Android device profiles — Telegram sees these as normal mobile logins
+ANDROID_DEVICES = [
+    {"device_model": "Samsung Galaxy S23",  "system_version": "Android 13", "app_version": "10.3.2"},
+    {"device_model": "Samsung Galaxy S22",  "system_version": "Android 13", "app_version": "10.3.1"},
+    {"device_model": "Xiaomi 13 Pro",       "system_version": "Android 13", "app_version": "10.2.9"},
+    {"device_model": "OnePlus 11",          "system_version": "Android 13", "app_version": "10.3.0"},
+    {"device_model": "Google Pixel 7",      "system_version": "Android 13", "app_version": "10.3.2"},
+    {"device_model": "Samsung Galaxy A54",  "system_version": "Android 13", "app_version": "10.1.5"},
+    {"device_model": "Tecno Camon 20",      "system_version": "Android 12", "app_version": "10.0.9"},
+    {"device_model": "Infinix Note 30",     "system_version": "Android 12", "app_version": "10.1.2"},
+    {"device_model": "Itel P40",            "system_version": "Android 12", "app_version": "10.0.8"},
+    {"device_model": "Samsung Galaxy A34",  "system_version": "Android 13", "app_version": "10.2.1"},
+]
 
 
 async def generate_session(api_id: int, api_hash: str, bot_number: int, total: int) -> str | None:
@@ -30,7 +45,17 @@ async def generate_session(api_id: int, api_hash: str, bot_number: int, total: i
         print(f"  Bot {bot_number} skipped.")
         return None
 
-    client = TelegramClient(StringSession(), api_id, api_hash)
+    device = random.choice(ANDROID_DEVICES)
+    print(f"  Using device profile: {device['device_model']}")
+
+    client = TelegramClient(
+        StringSession(), api_id, api_hash,
+        device_model=device["device_model"],
+        system_version=device["system_version"],
+        app_version=device["app_version"],
+        lang_code="en",
+        system_lang_code="en-US",
+    )
 
     try:
         await client.connect()
