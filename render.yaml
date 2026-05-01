@@ -5,5 +5,9 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
-      - key: BOTS_CONFIG
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOTS_SESSIONS
         sync: false
