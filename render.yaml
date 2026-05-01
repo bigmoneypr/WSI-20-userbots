@@ -1,0 +1,127 @@
+services:
+  - type: worker
+    name: wsi-20-userbots
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT1_API_ID
+        sync: false
+      - key: BOT1_API_HASH
+        sync: false
+      - key: BOT1_SESSION
+        sync: false
+      - key: BOT2_API_ID
+        sync: false
+      - key: BOT2_API_HASH
+        sync: false
+      - key: BOT2_SESSION
+        sync: false
+      - key: BOT3_API_ID
+        sync: false
+      - key: BOT3_API_HASH
+        sync: false
+      - key: BOT3_SESSION
+        sync: false
+      - key: BOT4_API_ID
+        sync: false
+      - key: BOT4_API_HASH
+        sync: false
+      - key: BOT4_SESSION
+        sync: false
+      - key: BOT5_API_ID
+        sync: false
+      - key: BOT5_API_HASH
+        sync: false
+      - key: BOT5_SESSION
+        sync: false
+      - key: BOT6_API_ID
+        sync: false
+      - key: BOT6_API_HASH
+        sync: false
+      - key: BOT6_SESSION
+        sync: false
+      - key: BOT7_API_ID
+        sync: false
+      - key: BOT7_API_HASH
+        sync: false
+      - key: BOT7_SESSION
+        sync: false
+      - key: BOT8_API_ID
+        sync: false
+      - key: BOT8_API_HASH
+        sync: false
+      - key: BOT8_SESSION
+        sync: false
+      - key: BOT9_API_ID
+        sync: false
+      - key: BOT9_API_HASH
+        sync: false
+      - key: BOT9_SESSION
+        sync: false
+      - key: BOT10_API_ID
+        sync: false
+      - key: BOT10_API_HASH
+        sync: false
+      - key: BOT10_SESSION
+        sync: false
+      - key: BOT11_API_ID
+        sync: false
+      - key: BOT11_API_HASH
+        sync: false
+      - key: BOT11_SESSION
+        sync: false
+      - key: BOT12_API_ID
+        sync: false
+      - key: BOT12_API_HASH
+        sync: false
+      - key: BOT12_SESSION
+        sync: false
+      - key: BOT13_API_ID
+        sync: false
+      - key: BOT13_API_HASH
+        sync: false
+      - key: BOT13_SESSION
+        sync: false
+      - key: BOT14_API_ID
+        sync: false
+      - key: BOT14_API_HASH
+        sync: false
+      - key: BOT14_SESSION
+        sync: false
+      - key: BOT15_API_ID
+        sync: false
+      - key: BOT15_API_HASH
+        sync: false
+      - key: BOT15_SESSION
+        sync: false
+      - key: BOT16_API_ID
+        sync: false
+      - key: BOT16_API_HASH
+        sync: false
+      - key: BOT16_SESSION
+        sync: false
+      - key: BOT17_API_ID
+        sync: false
+      - key: BOT17_API_HASH
+        sync: false
+      - key: BOT17_SESSION
+        sync: false
+      - key: BOT18_API_ID
+        sync: false
+      - key: BOT18_API_HASH
+        sync: false
+      - key: BOT18_SESSION
+        sync: false
+      - key: BOT19_API_ID
+        sync: false
+      - key: BOT19_API_HASH
+        sync: false
+      - key: BOT19_SESSION
+        sync: false
+      - key: BOT20_API_ID
+        sync: false
+      - key: BOT20_API_HASH
+        sync: false
+      - key: BOT20_SESSION
+        sync: false
