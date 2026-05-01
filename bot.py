@@ -7,7 +7,7 @@ import pytz
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-from config import CHAT_IDS, SCHEDULE, TIMEZONE, NUM_BOTS, get_bot_credentials
+from config import CHAT_IDS, SCHEDULE, TIMEZONE, get_all_bot_credentials
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,28 +30,31 @@ def seconds_until(hour: int, minute: int) -> float:
     return (target - now).total_seconds()
 
 
-def random_delay_for_bot(bot_index: int, window_minutes: int = 20) -> float:
+def random_delay_for_bot(bot_index: int, num_bots: int, window_minutes: int = 20) -> float:
     """
-    Spread 20 bots across the window so they don't all message at once.
-    Bot 0 sends near the start, bot 19 near the end.
+    Spread bots across the window so they don't all message at once.
     Adds a small random jitter of ±30 seconds.
     """
     window_seconds = window_minutes * 60
-    base_delay = (bot_index / (NUM_BOTS - 1)) * window_seconds
+    divisor = max(num_bots - 1, 1)
+    base_delay = (bot_index / divisor) * window_seconds
     jitter = random.uniform(-30, 30)
     return max(0, base_delay + jitter)
 
 
-async def run_bot(bot_index: int):
-    creds = get_bot_credentials(bot_index)
-    if not creds["api_id"] or not creds["api_hash"] or not creds["session"]:
+async def run_bot(bot_index: int, creds: dict, num_bots: int):
+    api_id = creds.get("api_id")
+    api_hash = creds.get("api_hash")
+    session = creds.get("session")
+
+    if not api_id or not api_hash or not session:
         logger.warning(f"Bot {bot_index + 1}: Missing credentials, skipping.")
         return
 
     client = TelegramClient(
-        StringSession(creds["session"]),
-        creds["api_id"],
-        creds["api_hash"],
+        StringSession(session),
+        int(api_id),
+        api_hash,
     )
 
     logger.info(f"Bot {bot_index + 1}: Connecting...")
@@ -66,7 +69,6 @@ async def run_bot(bot_index: int):
 
     try:
         while True:
-            now = now_nigeria()
             # Find the next scheduled window
             next_event = None
             min_wait = float("inf")
@@ -78,17 +80,16 @@ async def run_bot(bot_index: int):
                     next_event = (sh, sm, eh, em, msg)
 
             sh, sm, eh, em, msg = next_event
-            bot_delay = random_delay_for_bot(bot_index)
+            bot_delay = random_delay_for_bot(bot_index, num_bots)
             total_wait = min_wait + bot_delay
 
             logger.info(
-                f"Bot {bot_index + 1}: Next event '{msg}' at {sh:02d}:{sm:02d} Nigeria time. "
-                f"Waiting {total_wait:.0f}s (includes {bot_delay:.0f}s stagger delay)."
+                f"Bot {bot_index + 1}: Next '{msg}' at {sh:02d}:{sm:02d} WAT. "
+                f"Sleeping {total_wait:.0f}s (stagger: {bot_delay:.0f}s)."
             )
 
             await asyncio.sleep(total_wait)
 
-            # Send to all chat IDs
             for chat_id in CHAT_IDS:
                 try:
                     await client.send_message(chat_id, msg)
@@ -96,8 +97,8 @@ async def run_bot(bot_index: int):
                 except Exception as e:
                     logger.error(f"Bot {bot_index + 1}: Failed to send to {chat_id}: {e}")
 
-            # Sleep 60 seconds to avoid re-triggering the same window
-            await asyncio.sleep(60)
+            # Sleep 90s to avoid re-triggering within the same window
+            await asyncio.sleep(90)
 
     finally:
         await client.disconnect()
@@ -105,8 +106,10 @@ async def run_bot(bot_index: int):
 
 
 async def main():
-    logger.info(f"Starting {NUM_BOTS} WSI userbots...")
-    tasks = [run_bot(i) for i in range(NUM_BOTS)]
+    all_creds = get_all_bot_credentials()
+    num_bots = len(all_creds)
+    logger.info(f"Starting {num_bots} WSI userbots...")
+    tasks = [run_bot(i, creds, num_bots) for i, creds in enumerate(all_creds)]
     await asyncio.gather(*tasks)
 
 
