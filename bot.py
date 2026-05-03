@@ -507,6 +507,184 @@ async def run_boss_bot():
                 pass
 
 
+# ─── Group lock / unlock helpers ──────────────────────────────────────────────
+
+async def lock_all_groups(client: TelegramClient, label: str):
+    """Restrict all members from sending messages in every group (slow mode off, send locked)."""
+    from telethon.tl.functions.messages import EditChatDefaultBannedRightsRequest
+    from telethon.tl.types import ChatBannedRights
+
+    rights = ChatBannedRights(
+        until_date=None,
+        send_messages=True,
+        send_media=True,
+        send_stickers=True,
+        send_gifs=True,
+        send_games=True,
+        send_inline=True,
+        embed_links=True,
+    )
+    for chat_id in CHAT_IDS:
+        try:
+            await client(EditChatDefaultBannedRightsRequest(peer=chat_id, banned_rights=rights))
+            logger.info(f"{label}: 🔒 Locked group {chat_id}")
+        except Exception as e:
+            logger.error(f"{label}: Failed to lock group {chat_id}: {e}")
+        await asyncio.sleep(2)
+
+
+async def unlock_all_groups(client: TelegramClient, label: str):
+    """Remove send restrictions from all groups so members can talk freely again."""
+    from telethon.tl.functions.messages import EditChatDefaultBannedRightsRequest
+    from telethon.tl.types import ChatBannedRights
+
+    rights = ChatBannedRights(
+        until_date=None,
+        send_messages=False,
+        send_media=False,
+        send_stickers=False,
+        send_gifs=False,
+        send_games=False,
+        send_inline=False,
+        embed_links=False,
+    )
+    for chat_id in CHAT_IDS:
+        try:
+            await client(EditChatDefaultBannedRightsRequest(peer=chat_id, banned_rights=rights))
+            logger.info(f"{label}: 🔓 Unlocked group {chat_id}")
+        except Exception as e:
+            logger.error(f"{label}: Failed to unlock group {chat_id}: {e}")
+        await asyncio.sleep(2)
+
+
+# ─── Group locker (runs as part of the Professor's session) ───────────────────
+
+LOCK_TRIGGER_DELAY = 2 * 60    # seconds after "Ready" slot fires → lock
+UNLOCK_TRIGGER_DELAY = 2 * 60  # seconds after "Done"  slot fires → unlock
+
+
+async def run_group_locker():
+    """
+    Watches the main bot schedule for 'Ready' and 'Done' message slots.
+    - 2 min after 'Ready' time  → Professor locks all groups
+    - 2 min after 'Done'  time  → Professor unlocks all groups
+
+    Uses the Professor's own Telegram session so it has admin rights.
+    """
+    label = "Professor[Locker]"
+
+    # Wait until we have a boss session
+    while True:
+        async with _schedule_lock:
+            sess_str = _boss_session_string
+
+        if sess_str:
+            break
+        logger.info(f"{label}: No Professor session yet — waiting 5 min before retrying...")
+        await asyncio.sleep(5 * 60)
+
+    if not API_ID or not API_HASH:
+        logger.error(f"{label}: API_ID / API_HASH not set. Group locker cannot start.")
+        return
+
+    outer_attempt = 0
+
+    while True:
+        client = TelegramClient(
+            StringSession(sess_str),
+            int(API_ID),
+            API_HASH,
+            connection_retries=5,
+            retry_delay=3,
+            auto_reconnect=True,
+        )
+
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                logger.error(f"{label}: Session not authorized. Cannot lock/unlock groups.")
+                return
+            logger.info(f"{label}: Connected. Watching schedule for Ready/Done triggers.")
+
+            while True:
+                # Refresh session string and schedule each loop
+                async with _schedule_lock:
+                    sess_str = _boss_session_string
+                    current_schedule = list(_live_schedule)
+
+                if not current_schedule:
+                    await asyncio.sleep(60)
+                    continue
+
+                # Build list of upcoming trigger events
+                # Each entry: (seconds_to_wait, action)
+                events = []
+                for (sh, sm, eh, em, msg) in current_schedule:
+                    # Add LOCK_TRIGGER_DELAY / UNLOCK_TRIGGER_DELAY minutes to slot time
+                    if "ready" in msg.lower():
+                        delay_sec = LOCK_TRIGGER_DELAY
+                        action = "lock"
+                    elif "done" in msg.lower():
+                        delay_sec = UNLOCK_TRIGGER_DELAY
+                        action = "unlock"
+                    else:
+                        continue
+
+                    # Compute target time = slot time + delay
+                    total_minutes = sh * 60 + sm + (delay_sec // 60)
+                    target_h = (total_minutes // 60) % 24
+                    target_m = total_minutes % 60
+                    wait = seconds_until(target_h, target_m)
+                    events.append((wait, action, msg, sh, sm))
+
+                if not events:
+                    logger.info(f"{label}: No 'Ready'/'Done' slots in schedule. Checking again in 30 min.")
+                    await asyncio.sleep(30 * 60)
+                    continue
+
+                # Pick the soonest upcoming event
+                events.sort(key=lambda x: x[0])
+                wait, action, trigger_msg, sh, sm = events[0]
+
+                logger.info(
+                    f"{label}: Next {action.upper()} in {wait / 60:.1f} min "
+                    f"(2 min after '{trigger_msg}' at {sh:02d}:{sm:02d} WAT)"
+                )
+
+                await asyncio.sleep(wait)
+
+                if not await ensure_connected(client, label):
+                    logger.warning(f"{label}: Cannot connect — skipping {action}.")
+                    await asyncio.sleep(60)
+                    continue
+
+                if action == "lock":
+                    logger.info(f"{label}: 🔒 Locking all groups now...")
+                    await lock_all_groups(client, label)
+                else:
+                    logger.info(f"{label}: 🔓 Unlocking all groups now...")
+                    await unlock_all_groups(client, label)
+
+                # Brief cooldown so we don't immediately re-trigger the same slot
+                await asyncio.sleep(90)
+
+        except (SessionRevokedError, AuthKeyUnregisteredError, UserDeactivatedBanError) as e:
+            logger.error(f"{label}: Fatal auth error — {e}. Group locker stopping.")
+            return
+
+        except Exception as e:
+            outer_attempt += 1
+            delay = exponential_backoff(outer_attempt)
+            logger.error(f"{label}: Crash — {e}. Restarting in {delay:.0f}s...")
+            await asyncio.sleep(delay)
+
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+
 # ─── Entry point ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -519,6 +697,7 @@ async def main():
 
     tasks = [run_bot(i, creds, num_bots) for i, creds in enumerate(all_creds)]
     tasks.append(run_boss_bot())
+    tasks.append(run_group_locker())
     tasks.append(schedule_refresher())
     await asyncio.gather(*tasks, return_exceptions=True)
 
