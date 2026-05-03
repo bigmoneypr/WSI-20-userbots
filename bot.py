@@ -559,8 +559,8 @@ async def unlock_all_groups(client: TelegramClient, label: str):
 
 # ─── Group locker (runs as part of the Professor's session) ───────────────────
 
-LOCK_TRIGGER_DELAY = 2 * 60    # seconds after "Ready" slot fires → lock
-UNLOCK_TRIGGER_DELAY = 2 * 60  # seconds after "Done"  slot fires → unlock
+LOCK_OFFSET_MIN   = +2   # minutes AFTER "Ready" slot  → lock groups
+UNLOCK_OFFSET_MIN = -2   # minutes BEFORE "Done"  slot → unlock groups
 
 
 async def run_group_locker():
@@ -617,21 +617,20 @@ async def run_group_locker():
                     continue
 
                 # Build list of upcoming trigger events
-                # Each entry: (seconds_to_wait, action)
+                # Each entry: (seconds_to_wait, action, trigger_msg, slot_h, slot_m)
                 events = []
                 for (sh, sm, eh, em, msg) in current_schedule:
-                    # Add LOCK_TRIGGER_DELAY / UNLOCK_TRIGGER_DELAY minutes to slot time
                     if "ready" in msg.lower():
-                        delay_sec = LOCK_TRIGGER_DELAY
+                        offset_min = LOCK_OFFSET_MIN    # +2 → 2 min AFTER Ready
                         action = "lock"
                     elif "done" in msg.lower():
-                        delay_sec = UNLOCK_TRIGGER_DELAY
+                        offset_min = UNLOCK_OFFSET_MIN  # -2 → 2 min BEFORE Done
                         action = "unlock"
                     else:
                         continue
 
-                    # Compute target time = slot time + delay
-                    total_minutes = sh * 60 + sm + (delay_sec // 60)
+                    # Target time = slot time ± offset
+                    total_minutes = sh * 60 + sm + offset_min
                     target_h = (total_minutes // 60) % 24
                     target_m = total_minutes % 60
                     wait = seconds_until(target_h, target_m)
@@ -646,9 +645,10 @@ async def run_group_locker():
                 events.sort(key=lambda x: x[0])
                 wait, action, trigger_msg, sh, sm = events[0]
 
+                direction = "2 min after" if action == "lock" else "2 min before"
                 logger.info(
                     f"{label}: Next {action.upper()} in {wait / 60:.1f} min "
-                    f"(2 min after '{trigger_msg}' at {sh:02d}:{sm:02d} WAT)"
+                    f"({direction} '{trigger_msg}' slot at {sh:02d}:{sm:02d} WAT)"
                 )
 
                 await asyncio.sleep(wait)
