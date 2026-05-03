@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import os
 import random
 from datetime import datetime, timedelta
 
+import aiohttp
 import pytz
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -24,8 +26,16 @@ logger = logging.getLogger("wsi-userbots")
 TZ = pytz.timezone(TIMEZONE)
 
 MAX_RECONNECT_ATTEMPTS = 10
-BASE_RECONNECT_DELAY = 5      # seconds
-MAX_RECONNECT_DELAY = 300     # 5 minutes cap
+BASE_RECONNECT_DELAY = 5
+MAX_RECONNECT_DELAY = 300
+
+# Optional: set these on Render to enable bot status monitoring
+# REPLIT_WEBHOOK_URL = https://<your-replit-domain>/api/sessions/bot-ping
+# BOT_PROJECT_ID = <your project id>
+# API_HASH = <your api hash>  (already required by config)
+REPLIT_WEBHOOK_URL = os.environ.get("REPLIT_WEBHOOK_URL", "").strip()
+BOT_PROJECT_ID = os.environ.get("BOT_PROJECT_ID", "").strip()
+API_HASH = os.environ.get("API_HASH", "").strip()
 
 
 def now_nigeria() -> datetime:
@@ -53,13 +63,36 @@ def exponential_backoff(attempt: int) -> float:
     return min(delay, MAX_RECONNECT_DELAY) + random.uniform(0, 5)
 
 
+async def ping_status(bot_index: int, phone: str, msg_count: int, last_group: str, last_msg: str):
+    """Send a status ping to the Replit session manager (best-effort, never blocks bots)."""
+    if not REPLIT_WEBHOOK_URL or not BOT_PROJECT_ID or not API_HASH:
+        return
+    payload = {
+        "project_id": BOT_PROJECT_ID,
+        "bot_index": bot_index,
+        "phone": phone,
+        "msg_count": msg_count,
+        "last_group": last_group,
+        "last_msg": last_msg,
+        "api_hash": API_HASH,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                REPLIT_WEBHOOK_URL,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    logger.debug(f"Ping returned {resp.status}")
+    except Exception as e:
+        logger.debug(f"Ping failed (non-critical): {e}")
+
+
 async def ensure_connected(client: TelegramClient, bot_num: int) -> bool:
-    """Check connection and reconnect if needed. Returns True if connected."""
     if client.is_connected():
         return True
-
     logger.warning(f"Bot {bot_num}: Disconnected. Attempting to reconnect...")
-
     for attempt in range(MAX_RECONNECT_ATTEMPTS):
         try:
             await client.connect()
@@ -76,13 +109,11 @@ async def ensure_connected(client: TelegramClient, bot_num: int) -> bool:
                 f"Retrying in {delay:.0f}s..."
             )
             await asyncio.sleep(delay)
-
     logger.error(f"Bot {bot_num}: All {MAX_RECONNECT_ATTEMPTS} reconnect attempts failed. Giving up.")
     return False
 
 
 async def send_with_retry(client: TelegramClient, chat_id: int, msg: str, bot_num: int):
-    """Send a message with retry on failure."""
     for attempt in range(3):
         try:
             if not await ensure_connected(client, bot_num):
@@ -109,13 +140,15 @@ async def run_bot(bot_index: int, creds: dict, num_bots: int):
     api_id = creds.get("api_id")
     api_hash = creds.get("api_hash")
     session = creds.get("session")
+    phone = creds.get("phone", f"bot_{bot_num}")
 
     if not api_id or not api_hash or not session:
         logger.warning(f"Bot {bot_num}: Missing credentials, skipping.")
         return
 
-    # Outer reconnect loop — if the whole bot crashes, restart it
+    msg_count = 0
     outer_attempt = 0
+
     while True:
         client = TelegramClient(
             StringSession(session),
@@ -136,8 +169,10 @@ async def run_bot(bot_index: int, creds: dict, num_bots: int):
 
             logger.info(f"Bot {bot_num}: Connected and authorized.")
 
+            # Send initial ping so monitor shows bot is alive
+            await ping_status(bot_index, phone, msg_count, "", "startup")
+
             while True:
-                # Find the next scheduled window
                 min_wait = float("inf")
                 next_event = None
 
@@ -158,13 +193,19 @@ async def run_bot(bot_index: int, creds: dict, num_bots: int):
 
                 await asyncio.sleep(total_wait)
 
-                # Ensure still connected before sending
                 if not await ensure_connected(client, bot_num):
                     logger.warning(f"Bot {bot_num}: Could not reconnect. Will retry outer loop.")
                     break
 
+                last_group = str(CHAT_IDS[-1]) if CHAT_IDS else ""
                 for chat_id in CHAT_IDS:
                     await send_with_retry(client, chat_id, msg, bot_num)
+                    last_group = str(chat_id)
+
+                msg_count += len(CHAT_IDS)
+
+                # Ping status monitor after sending
+                await ping_status(bot_index, phone, msg_count, last_group, msg)
 
                 await asyncio.sleep(90)
 
