@@ -337,19 +337,34 @@ async def run_bot(bot_index: int, creds: dict, num_bots: int):
                     logger.warning(f"{label}: Could not reconnect. Retrying outer loop.")
                     break
 
-                # Send to each group with a random delay between each one
-                last_group = str(CHAT_IDS[-1]) if CHAT_IDS else ""
-                for i, chat_id in enumerate(CHAT_IDS):
-                    await send_with_retry(client, chat_id, msg, label)
-                    last_group = str(chat_id)
-                    # Random delay between groups (skip delay after last group)
-                    if i < len(CHAT_IDS) - 1:
-                        group_delay = random.uniform(MIN_GROUP_DELAY, MAX_GROUP_DELAY)
-                        logger.info(f"{label}: Waiting {group_delay:.0f}s before next group...")
-                        await asyncio.sleep(group_delay)
+                num_groups = len(CHAT_IDS)
+                if num_groups == 0:
+                    await asyncio.sleep(90)
+                    continue
 
-                msg_count += len(CHAT_IDS)
-                await ping_status(bot_index, phone, msg_count, last_group, msg)
+                # ── Group rotation ────────────────────────────────────────────
+                # Each bot is assigned exactly ONE group per cycle. The assignment
+                # rotates every cycle (keyed on date + scheduled hour) so the same
+                # bots never always cover the same group. With 20 bots + 3 groups,
+                # ~6-7 different accounts post in each group per cycle, all at
+                # different times thanks to the stagger delay already applied above.
+                #
+                # Formula: assigned_group = (bot_index + rotation_offset) % num_groups
+                # rotation_offset changes daily per time slot so groups see new faces.
+                now = now_nigeria()
+                rotation_offset = (now.timetuple().tm_yday * len(current_schedule) +
+                                   current_schedule.index(next_event) if next_event in current_schedule else now.hour)
+                assigned_group_idx = (bot_index + rotation_offset) % num_groups
+                assigned_chat_id = CHAT_IDS[assigned_group_idx]
+
+                logger.info(
+                    f"{label}: Assigned to group {assigned_group_idx + 1} of {num_groups} "
+                    f"(rotation offset {rotation_offset}) — sending '{msg}'"
+                )
+
+                await send_with_retry(client, assigned_chat_id, msg, label)
+                msg_count += 1
+                await ping_status(bot_index, phone, msg_count, str(assigned_chat_id), msg)
 
                 # Cooldown after full send cycle before sleeping until next slot
                 await asyncio.sleep(90)
