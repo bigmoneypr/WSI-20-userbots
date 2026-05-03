@@ -559,8 +559,9 @@ async def unlock_all_groups(client: TelegramClient, label: str):
 
 # ─── Group locker (runs as part of the Professor's session) ───────────────────
 
-LOCK_OFFSET_MIN   = +2   # minutes AFTER "Ready" slot  → lock groups
-UNLOCK_OFFSET_MIN = -2   # minutes BEFORE "Done"  slot → unlock groups
+STAGGER_WINDOW_MIN = 20  # must match window_minutes in stagger_delay()
+LOCK_OFFSET_MIN    = STAGGER_WINDOW_MIN + 2   # 2 min after last bot finishes Ready (+22)
+UNLOCK_OFFSET_MIN  = -2                        # 2 min before first Done bot starts
 
 
 async def run_group_locker():
