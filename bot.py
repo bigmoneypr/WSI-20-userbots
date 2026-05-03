@@ -15,7 +15,7 @@ from telethon.errors import (
     FloodWaitError,
 )
 
-from config import CHAT_IDS, SCHEDULE, TIMEZONE, get_all_bot_credentials
+from config import CHAT_IDS, SCHEDULE as FALLBACK_SCHEDULE, TIMEZONE, get_all_bot_credentials
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,13 +29,91 @@ MAX_RECONNECT_ATTEMPTS = 10
 BASE_RECONNECT_DELAY = 5
 MAX_RECONNECT_DELAY = 300
 
-# Optional: set these on Render to enable bot status monitoring
-# REPLIT_WEBHOOK_URL = https://<your-replit-domain>/api/sessions/bot-ping
-# BOT_PROJECT_ID = <your project id>
-# API_HASH = <your api hash>  (already required by config)
+# Render env vars for Replit integration
 REPLIT_WEBHOOK_URL = os.environ.get("REPLIT_WEBHOOK_URL", "").strip()
 BOT_PROJECT_ID = os.environ.get("BOT_PROJECT_ID", "").strip()
 API_HASH = os.environ.get("API_HASH", "").strip()
+
+# How often (seconds) to re-fetch the schedule from Replit (6 hours)
+SCHEDULE_REFRESH_INTERVAL = 6 * 60 * 60
+
+# Shared mutable schedule — all bots read from this list
+_live_schedule: list = list(FALLBACK_SCHEDULE)
+_schedule_lock = asyncio.Lock()
+
+
+def _parse_remote_schedule(raw: list) -> list:
+    """Convert [{hour, minute, message}] from Replit API to (sh, sm, eh, em, msg) tuples."""
+    result = []
+    for entry in raw:
+        try:
+            h = int(entry.get("hour", 0))
+            m = int(entry.get("minute", 0))
+            msg = str(entry.get("message", ""))
+            if not msg:
+                continue
+            # end window = start + 20 min (matches schedule editor preview format)
+            eh = h
+            em = (m + 20) % 60
+            if m + 20 >= 60:
+                eh = (h + 1) % 24
+            result.append((h, m, eh, em, msg))
+        except Exception:
+            continue
+    return result
+
+
+async def fetch_remote_schedule() -> list | None:
+    """Fetch schedule from Replit. Returns parsed tuple list or None on failure."""
+    if not REPLIT_WEBHOOK_URL or not BOT_PROJECT_ID or not API_HASH:
+        return None
+    # Derive the base URL from the webhook URL
+    # e.g. https://x.replit.app/api/sessions/bot-ping -> https://x.replit.app/api/sessions/bot-schedule/ID
+    base = REPLIT_WEBHOOK_URL.rsplit("/bot-ping", 1)[0]
+    url = f"{base}/bot-schedule/{BOT_PROJECT_ID}?api_hash={API_HASH}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    raw = data.get("schedule", [])
+                    if raw:
+                        parsed = _parse_remote_schedule(raw)
+                        if parsed:
+                            return parsed
+                else:
+                    logger.warning(f"Schedule fetch returned HTTP {resp.status}")
+    except Exception as e:
+        logger.warning(f"Schedule fetch failed (will use current): {e}")
+    return None
+
+
+async def schedule_refresher():
+    """Background task: refresh schedule from Replit every SCHEDULE_REFRESH_INTERVAL seconds."""
+    global _live_schedule
+    while True:
+        await asyncio.sleep(SCHEDULE_REFRESH_INTERVAL)
+        logger.info("Refreshing schedule from Replit...")
+        result = await fetch_remote_schedule()
+        if result:
+            async with _schedule_lock:
+                _live_schedule = result
+            logger.info(f"Schedule updated: {len(result)} time slot(s)")
+        else:
+            logger.info("Schedule refresh returned no data — keeping current schedule.")
+
+
+async def load_initial_schedule():
+    """On startup, try to pull schedule from Replit; fall back to config.py."""
+    global _live_schedule
+    logger.info("Fetching schedule from Replit...")
+    result = await fetch_remote_schedule()
+    if result:
+        async with _schedule_lock:
+            _live_schedule = result
+        logger.info(f"Remote schedule loaded: {len(result)} slot(s) — {result}")
+    else:
+        logger.info(f"Using fallback schedule from config.py: {len(_live_schedule)} slot(s)")
 
 
 def now_nigeria() -> datetime:
@@ -173,10 +251,18 @@ async def run_bot(bot_index: int, creds: dict, num_bots: int):
             await ping_status(bot_index, phone, msg_count, "", "startup")
 
             while True:
+                # Read the current live schedule (updated by schedule_refresher)
+                async with _schedule_lock:
+                    current_schedule = list(_live_schedule)
+
+                if not current_schedule:
+                    logger.warning(f"Bot {bot_num}: Schedule is empty, sleeping 60s...")
+                    await asyncio.sleep(60)
+                    continue
+
                 min_wait = float("inf")
                 next_event = None
-
-                for (sh, sm, eh, em, msg) in SCHEDULE:
+                for (sh, sm, eh, em, msg) in current_schedule:
                     wait = seconds_until(sh, sm)
                     if wait < min_wait:
                         min_wait = wait
@@ -233,7 +319,13 @@ async def main():
     all_creds = get_all_bot_credentials()
     num_bots = len(all_creds)
     logger.info(f"Starting {num_bots} WSI userbots with auto-reconnect enabled...")
+
+    # Load schedule from Replit before starting bots
+    await load_initial_schedule()
+
+    # Run bots + background schedule refresher concurrently
     tasks = [run_bot(i, creds, num_bots) for i, creds in enumerate(all_creds)]
+    tasks.append(schedule_refresher())
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
