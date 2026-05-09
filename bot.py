@@ -2,11 +2,12 @@ import asyncio
 import logging
 import os
 import random
+import re
 from datetime import datetime, timedelta
 
 import aiohttp
 import pytz
-from telethon import TelegramClient
+from telethon import TelegramClient, events as TelethonEvents
 from telethon.sessions import StringSession
 from telethon.errors import (
     SessionRevokedError,
@@ -49,7 +50,94 @@ _boss_fixed_slots: list = []       # Fixed slots — same message every day, ver
 _boss_session_string: str = ""
 _boss_phone: str = ""
 _professor_messages: list = []   # Random library messages fetched daily
+_greeting_enabled: bool = False   # Greeting auto-response toggle
 _schedule_lock = asyncio.Lock()
+
+# ─── Greeting response engine ──────────────────────────────────────────────────
+
+_greeting_cooldowns: dict = {}   # chat_id -> last_response_timestamp
+_greeting_lock = asyncio.Lock()
+
+GREETING_COOLDOWN_SEC = 180      # 3 min cooldown per chat before responding again
+GREETING_RESPONSE_CHANCE = 0.70  # 70% chance to respond (feels more human)
+
+GREETING_MAP = [
+    # English — morning
+    {"re": re.compile(r"\bgood\s*morning\b|\bgm\b", re.IGNORECASE),
+     "responses": ["Good morning! 🌅", "Morning! ☀️ 😊", "Good morning everyone! 🌅", "Rise and shine! Good morning! ☀️"]},
+    # English — afternoon
+    {"re": re.compile(r"\bgood\s*afternoon\b|\bga\b", re.IGNORECASE),
+     "responses": ["Good afternoon! 😊", "Good afternoon! Hope your day is going great! 🌤", "Good afternoon! 🌤"]},
+    # English — evening
+    {"re": re.compile(r"\bgood\s*evening\b|\bge\b", re.IGNORECASE),
+     "responses": ["Good evening! 🌆", "Good evening everyone! 😊", "Evening! 🌆 😊"]},
+    # English — night
+    {"re": re.compile(r"\bgood\s*night\b|\bgn\b", re.IGNORECASE),
+     "responses": ["Good night! 🌙", "Good night! Sweet dreams! 💤", "Night night! 🌙 💤"]},
+    # English — hello/hi
+    {"re": re.compile(r"\bhello\b|\bhi\b|\bhey\b|\bhow\s+are\s+you\b|\bhow\s+far\b|\bwhat\s+up\b|\bwassup\b", re.IGNORECASE),
+     "responses": ["Hello! 😊", "Hi there! 👋", "Hey! 😊", "Hello! How are you? 😊", "Hi! 👋 😊"]},
+    # Yoruba — morning
+    {"re": re.compile(r"\be?\s*kaaro\b", re.IGNORECASE),
+     "responses": ["E kaaro o! 🌅", "E kaaro! 😊", "E kaaro! Jẹ ki ọjọ rẹ ni ẹwà! 🌅"]},
+    # Yoruba — afternoon
+    {"re": re.compile(r"\be?\s*kaasan\b|\be?\s*kaasaan\b", re.IGNORECASE),
+     "responses": ["E kaasan o! 😊", "E kaasan! 🌤"]},
+    # Yoruba — evening
+    {"re": re.compile(r"\be?\s*kaale\b", re.IGNORECASE),
+     "responses": ["E kaale o! 🌆", "E kaale! 😊"]},
+    # Yoruba — greeting/how are you
+    {"re": re.compile(r"\bbawo\s*ni\b|\bpele\b|\bẹ\s*káàbọ̀\b", re.IGNORECASE),
+     "responses": ["Mo wa o! 😊", "A dupe! Bawo ni? 👋", "Ẹ káàbọ̀! 😊"]},
+    # Hausa — morning/greeting
+    {"re": re.compile(r"\bina\s*kwana\b|\bsannu\b", re.IGNORECASE),
+     "responses": ["Ina kwana! 🌅", "Lafiya lau! 😊", "Sannu! 👋"]},
+    # Hausa — afternoon
+    {"re": re.compile(r"\bina\s*wuni\b", re.IGNORECASE),
+     "responses": ["Ina wuni! 😊", "Lafiya! 🌤"]},
+    # Igbo — morning
+    {"re": re.compile(r"\butụtụ\b|\bututu\b|\bu\s*tu\s*tu\b", re.IGNORECASE),
+     "responses": ["Ụtụtụ ọma! 🌅", "Ụtụtụ ọma o! 😊"]},
+    # Arabic / Islamic
+    {"re": re.compile(r"\bassalamu?\s*alaikum\b|\bas-?salam\b|\bsalamu?\s*alaikum\b|\bsalam\b|\bwslm\b", re.IGNORECASE),
+     "responses": ["Wa alaikum assalam! 🙏", "Wa alaikum salam wa rahmatullahi wa barakatuh! 🤲", "Wa alaikum assalam wa rahmatullahi! 🙏"]},
+    # French — morning
+    {"re": re.compile(r"\bbonjour\b", re.IGNORECASE),
+     "responses": ["Bonjour! 😊", "Bonjour! Bonne journée! 🌟", "Bonjour tout le monde! 😊"]},
+    # French — evening
+    {"re": re.compile(r"\bbonsoir\b", re.IGNORECASE),
+     "responses": ["Bonsoir! 🌆", "Bonsoir! 😊"]},
+    # French — night
+    {"re": re.compile(r"\bbonne\s*nuit\b", re.IGNORECASE),
+     "responses": ["Bonne nuit! 🌙", "Bonne nuit! Faites de beaux rêves! 💤"]},
+    # French — hi
+    {"re": re.compile(r"\bsalut\b", re.IGNORECASE),
+     "responses": ["Salut! 😊", "Salut! Comment ça va? 👋"]},
+    # Spanish — morning
+    {"re": re.compile(r"\bbuenos?\s*d[ií]as?\b", re.IGNORECASE),
+     "responses": ["¡Buenos días! 🌅", "¡Buenos días! Que tengas un buen día! ☀️", "¡Buenos días a todos! 🌅"]},
+    # Spanish — afternoon
+    {"re": re.compile(r"\bbuenas?\s*tardes?\b", re.IGNORECASE),
+     "responses": ["¡Buenas tardes! 😊", "¡Buenas tardes! 🌤"]},
+    # Spanish — night
+    {"re": re.compile(r"\bbuenas?\s*noches?\b", re.IGNORECASE),
+     "responses": ["¡Buenas noches! 🌙", "¡Buenas noches! Dulces sueños! 💤"]},
+    # Spanish — hello
+    {"re": re.compile(r"\bhola\b", re.IGNORECASE),
+     "responses": ["¡Hola! 😊", "¡Hola! ¿Cómo estás? 👋"]},
+    # Portuguese — morning
+    {"re": re.compile(r"\bbom\s*dia\b", re.IGNORECASE),
+     "responses": ["Bom dia! 🌅", "Bom dia! Tenha um ótimo dia! ☀️", "Bom dia a todos! 🌅"]},
+    # Portuguese — afternoon
+    {"re": re.compile(r"\bboa\s*tarde\b", re.IGNORECASE),
+     "responses": ["Boa tarde! 😊", "Boa tarde! 🌤"]},
+    # Portuguese — night
+    {"re": re.compile(r"\bboa\s*noite\b", re.IGNORECASE),
+     "responses": ["Boa noite! 🌙", "Boa noite! Bons sonhos! 💤"]},
+    # Portuguese — hello
+    {"re": re.compile(r"\bol[aá]\b", re.IGNORECASE),
+     "responses": ["Olá! 😊", "Olá! Como vai? 👋"]},
+]
 
 
 # ─── Schedule parsing ──────────────────────────────────────────────────────────
@@ -135,7 +223,7 @@ async def fetch_professor_messages() -> list:
 
 async def load_initial_schedules():
     """On startup, load both main schedule and boss data from Replit."""
-    global _live_schedule, _boss_schedule, _boss_session_string, _boss_phone, _professor_messages
+    global _live_schedule, _boss_schedule, _boss_session_string, _boss_phone, _professor_messages, _greeting_enabled
 
     logger.info("Fetching main schedule from Replit...")
     main = await fetch_remote_schedule()
@@ -157,8 +245,9 @@ async def load_initial_schedules():
             _boss_fixed_slots = _parse_remote_schedule(raw_fixed)
             _boss_session_string = boss.get("boss_session_string", "")
             _boss_phone = boss.get("boss_phone", "")
+            _greeting_enabled = bool(boss.get("greeting_enabled", False))
             if _boss_session_string:
-                logger.info(f"Professor loaded: {_boss_phone}, {len(parsed)} library slot(s), {len(_boss_fixed_slots)} fixed slot(s)")
+                logger.info(f"Professor loaded: {_boss_phone}, {len(parsed)} library slot(s), {len(_boss_fixed_slots)} fixed slot(s), greeting={'ON' if _greeting_enabled else 'OFF'}")
             else:
                 logger.info("No Professor session configured — Professor bot will not run.")
         else:
@@ -170,7 +259,7 @@ async def load_initial_schedules():
 
 async def schedule_refresher():
     """Background task: refresh both schedules from Replit every 6 hours."""
-    global _live_schedule, _boss_schedule, _boss_session_string, _boss_phone, _professor_messages
+    global _live_schedule, _boss_schedule, _boss_session_string, _boss_phone, _professor_messages, _greeting_enabled
     while True:
         await asyncio.sleep(SCHEDULE_REFRESH_INTERVAL)
         logger.info("Refreshing schedules from Replit...")
@@ -187,12 +276,14 @@ async def schedule_refresher():
         if boss:
             parsed = _parse_remote_schedule(boss.get("schedule", []))
             fixed = _parse_remote_schedule(boss.get("fixed_slots", []))
+            new_greeting = bool(boss.get("greeting_enabled", False))
             async with _schedule_lock:
                 _boss_schedule = parsed
                 _boss_fixed_slots = fixed
                 _boss_session_string = boss.get("boss_session_string", "")
                 _boss_phone = boss.get("boss_phone", "")
-            logger.info(f"Professor refreshed: {len(parsed)} library slot(s), {len(fixed)} fixed slot(s)")
+                _greeting_enabled = new_greeting
+            logger.info(f"Professor refreshed: {len(parsed)} library slot(s), {len(fixed)} fixed slot(s), greeting={'ON' if new_greeting else 'OFF'}")
 
         if prof_msgs:
             async with _schedule_lock:
@@ -470,6 +561,54 @@ async def run_boss_bot():
                 return
 
             logger.info(f"{label}: Connected and authorized.")
+
+            # ── Greeting response handler ────────────────────────────────────
+            # Attaches to this client; fires asynchronously while we sleep in
+            # the scheduling loop below. Re-registered each outer-loop restart.
+            def _make_greeting_handler(prof_client):
+                async def _handle_greeting(event):
+                    global _greeting_enabled, _greeting_cooldowns
+                    async with _schedule_lock:
+                        if not _greeting_enabled:
+                            return
+                    text = (event.raw_text or "").strip()
+                    if not text:
+                        return
+                    matched = None
+                    for entry in GREETING_MAP:
+                        if entry["re"].search(text):
+                            matched = entry
+                            break
+                    if not matched:
+                        return
+                    chat_id = event.chat_id
+                    now_ts = asyncio.get_event_loop().time()
+                    async with _greeting_lock:
+                        last = _greeting_cooldowns.get(chat_id, 0)
+                        if now_ts - last < GREETING_COOLDOWN_SEC:
+                            return
+                        _greeting_cooldowns[chat_id] = now_ts
+                    if random.random() > GREETING_RESPONSE_CHANCE:
+                        return
+                    reply_text = random.choice(matched["responses"])
+                    delay = random.uniform(4, 22)
+                    await asyncio.sleep(delay)
+                    try:
+                        await prof_client.send_message(chat_id, reply_text)
+                        logger.info(f"Professor[Greeter]: Replied '{reply_text}' to '{text[:40]}' in chat {chat_id}")
+                    except FloodWaitError as fw:
+                        logger.warning(f"Professor[Greeter]: FloodWait {fw.seconds}s — skipping reply")
+                    except Exception as e:
+                        logger.warning(f"Professor[Greeter]: Failed to send greeting reply: {e}")
+                return _handle_greeting
+
+            if CHAT_IDS:
+                client.add_event_handler(
+                    _make_greeting_handler(client),
+                    TelethonEvents.NewMessage(chats=CHAT_IDS, incoming=True),
+                )
+                logger.info(f"{label}: Greeting handler attached to {len(CHAT_IDS)} group(s).")
+            # ────────────────────────────────────────────────────────────────
 
             while True:
                 async with _schedule_lock:
