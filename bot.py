@@ -47,6 +47,7 @@ _live_schedule: list = list(FALLBACK_SCHEDULE)
 _boss_schedule: list = []
 _boss_session_string: str = ""
 _boss_phone: str = ""
+_professor_messages: list = []   # Random library messages fetched daily
 _schedule_lock = asyncio.Lock()
 
 
@@ -112,9 +113,28 @@ async def fetch_boss_data() -> dict | None:
     return None
 
 
+async def fetch_professor_messages() -> list:
+    """Fetch random professor messages from the library (PIN-exempt endpoint)."""
+    if not REPLIT_WEBHOOK_URL or not BOT_PROJECT_ID or not API_HASH:
+        return []
+    url = f"{_base_url()}/bot-professor-messages/{BOT_PROJECT_ID}?api_hash={API_HASH}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    msgs = [m for m in data.get("messages", []) if m and str(m).strip()]
+                    logger.info(f"Professor message library: fetched {len(msgs)} message(s) for today.")
+                    return msgs
+                logger.warning(f"Professor messages fetch returned HTTP {resp.status}")
+    except Exception as e:
+        logger.warning(f"Professor messages fetch failed: {e}")
+    return []
+
+
 async def load_initial_schedules():
     """On startup, load both main schedule and boss data from Replit."""
-    global _live_schedule, _boss_schedule, _boss_session_string, _boss_phone
+    global _live_schedule, _boss_schedule, _boss_session_string, _boss_phone, _professor_messages
 
     logger.info("Fetching main schedule from Replit...")
     main = await fetch_remote_schedule()
@@ -126,7 +146,7 @@ async def load_initial_schedules():
             logger.info(f"Using fallback main schedule: {len(_live_schedule)} slot(s)")
 
     logger.info("Fetching Professor (boss) data from Replit...")
-    boss = await fetch_boss_data()
+    boss, prof_msgs = await asyncio.gather(fetch_boss_data(), fetch_professor_messages())
     async with _schedule_lock:
         if boss:
             raw_sched = boss.get("schedule", [])
@@ -140,22 +160,27 @@ async def load_initial_schedules():
                 logger.info("No Professor session configured — Professor bot will not run.")
         else:
             logger.info("Could not fetch boss data — Professor bot will not run.")
+        if prof_msgs:
+            _professor_messages = prof_msgs
+            logger.info(f"Professor message library loaded: {len(prof_msgs)} message(s)")
 
 
 async def schedule_refresher():
     """Background task: refresh both schedules from Replit every 6 hours."""
-    global _live_schedule, _boss_schedule, _boss_session_string, _boss_phone
+    global _live_schedule, _boss_schedule, _boss_session_string, _boss_phone, _professor_messages
     while True:
         await asyncio.sleep(SCHEDULE_REFRESH_INTERVAL)
         logger.info("Refreshing schedules from Replit...")
 
-        main = await fetch_remote_schedule()
+        main, boss, prof_msgs = await asyncio.gather(
+            fetch_remote_schedule(), fetch_boss_data(), fetch_professor_messages()
+        )
+
         if main:
             async with _schedule_lock:
                 _live_schedule = main
             logger.info(f"Main schedule refreshed: {len(main)} slot(s)")
 
-        boss = await fetch_boss_data()
         if boss:
             parsed = _parse_remote_schedule(boss.get("schedule", []))
             async with _schedule_lock:
@@ -163,6 +188,11 @@ async def schedule_refresher():
                 _boss_session_string = boss.get("boss_session_string", "")
                 _boss_phone = boss.get("boss_phone", "")
             logger.info(f"Professor schedule refreshed: {len(parsed)} slot(s)")
+
+        if prof_msgs:
+            async with _schedule_lock:
+                _professor_messages = prof_msgs
+            logger.info(f"Professor message library refreshed: {len(prof_msgs)} message(s)")
 
 
 # ─── Timing helpers ────────────────────────────────────────────────────────────
@@ -458,13 +488,29 @@ async def run_boss_bot():
                         next_event = slot
 
                 sh, sm, eh, em, msg = next_event
+
+                # Pick a message from library if available, otherwise fall back to schedule message
+                async with _schedule_lock:
+                    lib = list(_professor_messages)
+                if lib:
+                    send_msg = lib.pop(0)
+                    # Cycle: if we used the last one, reload for next iteration
+                    async with _schedule_lock:
+                        if not _professor_messages:
+                            _professor_messages.extend(lib if lib else [send_msg])
+                        else:
+                            _professor_messages.pop(0)
+                else:
+                    send_msg = msg
+
                 # Professor sends slightly after the stagger window ends (bots finish first)
                 boss_extra_delay = random.uniform(60, 180)
                 total_wait = min_wait + boss_extra_delay
 
                 logger.info(
                     f"{label}: Next message at {sh:02d}:{sm:02d} WAT. "
-                    f"Sleeping {total_wait:.0f}s (extra delay: {boss_extra_delay:.0f}s)."
+                    f"Sleeping {total_wait:.0f}s (extra delay: {boss_extra_delay:.0f}s). "
+                    f"Msg: {send_msg[:60]!r}"
                 )
 
                 await asyncio.sleep(total_wait)
@@ -476,7 +522,7 @@ async def run_boss_bot():
                 # Professor sends to all groups with a longer, more deliberate delay between each
                 last_group = str(CHAT_IDS[-1]) if CHAT_IDS else ""
                 for i, chat_id in enumerate(CHAT_IDS):
-                    await send_with_retry(client, chat_id, msg, label)
+                    await send_with_retry(client, chat_id, send_msg, label)
                     last_group = str(chat_id)
                     if i < len(CHAT_IDS) - 1:
                         # Professor waits longer — feels more authoritative
