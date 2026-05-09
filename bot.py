@@ -44,7 +44,8 @@ SCHEDULE_REFRESH_INTERVAL = 6 * 60 * 60
 
 # Shared mutable schedules — protected by lock
 _live_schedule: list = list(FALLBACK_SCHEDULE)
-_boss_schedule: list = []
+_boss_schedule: list = []          # Library slots — message picked randomly from uploaded library
+_boss_fixed_slots: list = []       # Fixed slots — same message every day, verbatim
 _boss_session_string: str = ""
 _boss_phone: str = ""
 _professor_messages: list = []   # Random library messages fetched daily
@@ -152,10 +153,12 @@ async def load_initial_schedules():
             raw_sched = boss.get("schedule", [])
             parsed = _parse_remote_schedule(raw_sched)
             _boss_schedule = parsed
+            raw_fixed = boss.get("fixed_slots", [])
+            _boss_fixed_slots = _parse_remote_schedule(raw_fixed)
             _boss_session_string = boss.get("boss_session_string", "")
             _boss_phone = boss.get("boss_phone", "")
             if _boss_session_string:
-                logger.info(f"Professor loaded: {_boss_phone}, {len(parsed)} schedule slot(s)")
+                logger.info(f"Professor loaded: {_boss_phone}, {len(parsed)} library slot(s), {len(_boss_fixed_slots)} fixed slot(s)")
             else:
                 logger.info("No Professor session configured — Professor bot will not run.")
         else:
@@ -183,11 +186,13 @@ async def schedule_refresher():
 
         if boss:
             parsed = _parse_remote_schedule(boss.get("schedule", []))
+            fixed = _parse_remote_schedule(boss.get("fixed_slots", []))
             async with _schedule_lock:
                 _boss_schedule = parsed
+                _boss_fixed_slots = fixed
                 _boss_session_string = boss.get("boss_session_string", "")
                 _boss_phone = boss.get("boss_phone", "")
-            logger.info(f"Professor schedule refreshed: {len(parsed)} slot(s)")
+            logger.info(f"Professor refreshed: {len(parsed)} library slot(s), {len(fixed)} fixed slot(s)")
 
         if prof_msgs:
             async with _schedule_lock:
@@ -469,48 +474,56 @@ async def run_boss_bot():
             while True:
                 async with _schedule_lock:
                     boss_sched = list(_boss_schedule)
+                    boss_fixed = list(_boss_fixed_slots)
                     # Also refresh session string in case it was updated
                     sess_str = _boss_session_string
                     phone = _boss_phone
 
-                if not boss_sched:
+                # Combine library slots (type='lib') and fixed slots (type='fix')
+                # Each combined entry: (sh, sm, eh, em, msg, slot_type)
+                combined = [(*s, 'lib') for s in boss_sched] + [(*s, 'fix') for s in boss_fixed]
+
+                if not combined:
                     logger.info(f"{label}: No schedule set — sleeping 30min, will check again.")
                     await asyncio.sleep(30 * 60)
                     continue
 
-                # Find next slot
+                # Find next slot across both lists
                 min_wait = float("inf")
                 next_event = None
-                for slot in boss_sched:
+                for slot in combined:
                     wait = seconds_until(slot[0], slot[1])
                     if wait < min_wait:
                         min_wait = wait
                         next_event = slot
 
-                sh, sm, eh, em, msg = next_event
+                sh, sm, eh, em, msg, slot_type = next_event
 
-                # Pick a message from library if available, otherwise fall back to schedule message
-                async with _schedule_lock:
-                    lib = list(_professor_messages)
-                if lib:
-                    send_msg = lib.pop(0)
-                    # Cycle: if we used the last one, reload for next iteration
-                    async with _schedule_lock:
-                        if not _professor_messages:
-                            _professor_messages.extend(lib if lib else [send_msg])
-                        else:
-                            _professor_messages.pop(0)
-                else:
+                if slot_type == 'fix':
+                    # Fixed slot — always send verbatim, no library involved
                     send_msg = msg
+                    logger.info(f"{label}: [FIXED] Next at {sh:02d}:{sm:02d} WAT. Msg: {send_msg[:60]!r}")
+                else:
+                    # Library slot — pick from random library, fall back to slot msg
+                    async with _schedule_lock:
+                        lib = list(_professor_messages)
+                    if lib:
+                        send_msg = lib.pop(0)
+                        async with _schedule_lock:
+                            if not _professor_messages:
+                                _professor_messages.extend(lib if lib else [send_msg])
+                            else:
+                                _professor_messages.pop(0)
+                    else:
+                        send_msg = msg
+                    logger.info(f"{label}: [LIBRARY] Next at {sh:02d}:{sm:02d} WAT. Msg: {send_msg[:60]!r}")
 
                 # Professor sends slightly after the stagger window ends (bots finish first)
                 boss_extra_delay = random.uniform(60, 180)
                 total_wait = min_wait + boss_extra_delay
 
                 logger.info(
-                    f"{label}: Next message at {sh:02d}:{sm:02d} WAT. "
-                    f"Sleeping {total_wait:.0f}s (extra delay: {boss_extra_delay:.0f}s). "
-                    f"Msg: {send_msg[:60]!r}"
+                    f"{label}: Sleeping {total_wait:.0f}s (extra delay: {boss_extra_delay:.0f}s)."
                 )
 
                 await asyncio.sleep(total_wait)
