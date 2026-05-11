@@ -527,7 +527,7 @@ async def run_bot(bot_index: int, creds: dict, num_bots: int):
 
 # ─── Professor (Boss) bot ──────────────────────────────────────────────────────
 
-async def run_boss_bot():
+async def run_boss_bot(all_creds: list):
     """The Professor — runs on its own separate schedule, sends after all regular bots."""
     global _boss_session_string, _boss_phone, _boss_schedule
 
@@ -576,9 +576,10 @@ async def run_boss_bot():
             logger.info(f"{label}: Connected and authorized.")
 
             # ── Greeting response handler ────────────────────────────────────
+            # Professor DETECTS greetings; a random regular userbot REPLIES.
             # Attaches to this client; fires asynchronously while we sleep in
             # the scheduling loop below. Re-registered each outer-loop restart.
-            def _make_greeting_handler(prof_client):
+            def _make_greeting_handler(bot_creds: list):
                 async def _handle_greeting(event):
                     global _greeting_enabled, _greeting_cooldowns
                     async with _schedule_lock:
@@ -604,23 +605,44 @@ async def run_boss_bot():
                     if random.random() > GREETING_RESPONSE_CHANCE:
                         return
                     reply_text = random.choice(matched["responses"])
+                    # Human-like delay before responding
                     delay = random.uniform(4, 22)
                     await asyncio.sleep(delay)
+                    # Pick a random userbot (not the Professor) to send the reply
+                    if not bot_creds:
+                        return
+                    responder = random.choice(bot_creds)
+                    resp_session = responder.get("session")
+                    resp_api_id = responder.get("api_id")
+                    resp_api_hash = responder.get("api_hash", API_HASH)
+                    if not resp_session or not resp_api_id:
+                        return
                     try:
-                        await prof_client.send_message(chat_id, reply_text)
-                        logger.info(f"Professor[Greeter]: Replied '{reply_text}' to '{text[:40]}' in chat {chat_id}")
+                        resp_client = TelegramClient(
+                            StringSession(resp_session),
+                            int(resp_api_id),
+                            resp_api_hash,
+                            connection_retries=2,
+                            retry_delay=2,
+                            auto_reconnect=False,
+                        )
+                        await resp_client.connect()
+                        if await resp_client.is_user_authorized():
+                            await resp_client.send_message(chat_id, reply_text)
+                            logger.info(f"Bot[Greeter] ({responder.get('phone','?')}): Replied '{reply_text}' to '{text[:40]}' in chat {chat_id}")
+                        await resp_client.disconnect()
                     except FloodWaitError as fw:
-                        logger.warning(f"Professor[Greeter]: FloodWait {fw.seconds}s — skipping reply")
+                        logger.warning(f"Bot[Greeter]: FloodWait {fw.seconds}s — skipping reply")
                     except Exception as e:
-                        logger.warning(f"Professor[Greeter]: Failed to send greeting reply: {e}")
+                        logger.warning(f"Bot[Greeter]: Failed to send greeting reply: {e}")
                 return _handle_greeting
 
             if CHAT_IDS:
                 client.add_event_handler(
-                    _make_greeting_handler(client),
+                    _make_greeting_handler(all_creds),
                     TelethonEvents.NewMessage(chats=CHAT_IDS, incoming=True),
                 )
-                logger.info(f"{label}: Greeting handler attached to {len(CHAT_IDS)} group(s).")
+                logger.info(f"{label}: Greeting handler attached — random userbot will reply to greetings in {len(CHAT_IDS)} group(s).")
             # ────────────────────────────────────────────────────────────────
 
             while True:
@@ -908,7 +930,7 @@ async def main():
     await load_initial_schedules()
 
     tasks = [run_bot(i, creds, num_bots) for i, creds in enumerate(all_creds)]
-    tasks.append(run_boss_bot())
+    tasks.append(run_boss_bot(all_creds))
     tasks.append(run_group_locker())
     tasks.append(schedule_refresher())
     await asyncio.gather(*tasks, return_exceptions=True)
