@@ -449,12 +449,26 @@ async def run_bot(bot_index: int, creds: dict, num_bots: int):
                         next_event = slot
 
                 sh, sm, eh, em, msg = next_event
-                delay = stagger_delay(bot_index, num_bots)
+
+                # ── Per-cycle seed ────────────────────────────────────────────
+                # Seeded by (day-of-year × slot-time) so every slot of every day
+                # gets a completely different shuffle. Stable across reconnects
+                # within the same cycle (same day + same slot = same seed).
+                now = now_nigeria()
+                cycle_seed = now.timetuple().tm_yday * 100000 + sh * 1000 + sm * 10
+
+                # ── Randomised stagger ────────────────────────────────────────
+                # Each bot draws a random position inside the 20-min window from
+                # its own seeded RNG (seed includes bot_index so they differ).
+                # The ORDER of sending is completely different every cycle, so
+                # it is never always Bot-1 → Bot-2 → Bot-3.
+                rng_s = random.Random(cycle_seed + bot_index * 997)
+                delay = rng_s.uniform(0, STAGGER_WINDOW_MIN * 60) + rng_s.uniform(5, 20)
                 total_wait = min_wait + delay
 
                 logger.info(
                     f"{label}: Next '{msg}' at {sh:02d}:{sm:02d} WAT. "
-                    f"Sleeping {total_wait:.0f}s (stagger: {delay:.0f}s)."
+                    f"Sleeping {total_wait:.0f}s (random stagger: {delay:.0f}s)."
                 )
 
                 await asyncio.sleep(total_wait)
@@ -468,24 +482,23 @@ async def run_bot(bot_index: int, creds: dict, num_bots: int):
                     await asyncio.sleep(90)
                     continue
 
-                # ── Group rotation ────────────────────────────────────────────
-                # Each bot is assigned exactly ONE group per cycle. The assignment
-                # rotates every cycle (keyed on date + scheduled hour) so the same
-                # bots never always cover the same group. With 20 bots + 3 groups,
-                # ~6-7 different accounts post in each group per cycle, all at
-                # different times thanks to the stagger delay already applied above.
-                #
-                # Formula: assigned_group = (bot_index + rotation_offset) % num_groups
-                # rotation_offset changes daily per time slot so groups see new faces.
-                now = now_nigeria()
-                rotation_offset = (now.timetuple().tm_yday * len(current_schedule) +
-                                   current_schedule.index(next_event) if next_event in current_schedule else now.hour)
-                assigned_group_idx = (bot_index + rotation_offset) % num_groups
+                # ── Randomised group assignment ───────────────────────────────
+                # Build a coverage list big enough for all bots, shuffle it with
+                # the cycle seed (shared across all bots), then each bot takes
+                # its own slot. Every group gets covered evenly; the mapping is
+                # different every slot so no bot is "always group A".
+                # Because bots fire at random times within the window, multiple
+                # groups receive posts simultaneously rather than sequentially.
+                rng_g = random.Random(cycle_seed)
+                repeats = num_bots // num_groups + 2
+                coverage = (list(range(num_groups)) * repeats)[:num_bots]
+                rng_g.shuffle(coverage)
+                assigned_group_idx = coverage[bot_index % len(coverage)]
                 assigned_chat_id = CHAT_IDS[assigned_group_idx]
 
                 logger.info(
                     f"{label}: Assigned to group {assigned_group_idx + 1} of {num_groups} "
-                    f"(rotation offset {rotation_offset}) — sending '{msg}'"
+                    f"(cycle seed {cycle_seed}) — sending '{msg}'"
                 )
 
                 await send_with_retry(client, assigned_chat_id, msg, label)
